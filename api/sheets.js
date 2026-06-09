@@ -1,4 +1,4 @@
-const SHEETS_URL = "https://script.google.com/macros/s/AKfycbxYLlNKyQc_1QjpfN2WGxGE7AJivb2lAqBdFKrKjchr5_3Ka2KSWSza5RyD86nT1HbQ/exec";
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycbzawvv_UQ1Rjs0uxJFFqgEmQLMiRY2j1NDvYsctXP14qttePwl0CrnFARHGtoN3MjiR/exec";
 const fetch = require("node-fetch");
 
 module.exports = async (req, res) => {
