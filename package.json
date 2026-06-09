@@ -1,0 +1,10 @@
+{
+  "name": "gymlog-ai",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node api/sheets.js"
+  },
+  "dependencies": {
+    "node-fetch": "2"
+  }
+}

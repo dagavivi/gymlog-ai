@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="GymLog AI"/>
+<title>GymLog AI</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #080b12; font-family: 'SF Mono', 'Fira Code', monospace; }
+  ::-webkit-scrollbar { width: 3px; } 
+  ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 2px; }
+  @keyframes pulse { 0%,80%,100%{opacity:.3;transform:scale(.8)} 40%{opacity:1;transform:scale(1)} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const API = "/api/sheets";
+const MODEL = "claude-sonnet-4-20250514";
+const SYSTEM_PROMPT = `You are an elite personal fitness AI and experienced personal trainer specializing in weight loss and muscle building. Deep knowledge of hypertrophy training, progressive overload, PPL splits (Jeff Nippard style).
+
+RULES:
+1. When user says "starting workout", record session start.
+2. After each set logged as "Set #: X lbs Y reps" — respond ONLY with the updated session table in markdown. No extra text.
+3. When user names a new exercise, add it to the log table.
+4. Auto-classify: Compound (multi-joint), Isolation (single-joint), Cardio.
+5. Auto-calculate Est. 1RM using Epley: weight x (1 + reps/30).
+6. Only on "end workout", "give analysis", "end without" — full analysis:
+   - Session duration, volume breakdown, balance assessment
+   - Hypertrophy Impact Score (HSS 1-10): mechanical tension, volume load, stretch under load, eccentric control, exercise selection, proximity to failure
+   - Progressive overload recommendations vs PR data provided
+7. On "week update" — sessions that week, overload trends, consistency score, stall alerts.
+8. On "export data" — output clean CSV block.
+9. Tone: professional, concise, data-driven. No fluff.
+
+Log table format:
+| Exercise | Type | Sets (Done/Total) | Target Reps | My Log | Est. 1RM |
+
+You receive: current session state + last 50 sets + PR summary per exercise.
+Use PR data to flag progressive overload wins or stalls.`;
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+const fmtTime = d => d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
+const fmtDate = d => d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
+const epley = (w,r) => r===1?w:Math.round(w*(1+r/30));
+
+async function sheetsGet(action) {
+  try { const r = await fetch(`${API}?action=${action}`); return await r.json(); } catch { return null; }
+}
+async function sheetsPost(payload) {
+  try { await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}); } catch(e){console.warn(e);}
+}
+
+function Md({text}) {
+  const lines = text.split("\n");
+  const out = []; let i = 0;
+  while(i<lines.length){
+    const l = lines[i];
+    if(l.trim().startsWith("|")){
+      const tbl=[];
+      while(i<lines.length&&lines[i].trim().startsWith("|")){tbl.push(lines[i]);i++;}
+      const heads=tbl[0].split("|").filter(c=>c.trim()).map(c=>c.trim());
+      const rows=tbl.slice(2).map(r=>r.split("|").filter(c=>c.trim()).map(c=>c.trim()));
+      out.push(<div key={i} style={{overflowX:"auto",margin:"8px 0"}}>
+        <table style={{borderCollapse:"collapse",fontSize:11,width:"100%",minWidth:420}}>
+          <thead><tr>{heads.map((h,j)=><th key={j} style={{background:"#0f172a",color:"#7dd3fc",padding:"6px 8px",textAlign:"left",border:"1px solid #1e3a5f",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((r,j)=><tr key={j}>{r.map((c,k)=><td key={k} style={{padding:"5px 8px",border:"1px solid #1e293b",color:"#cbd5e1",whiteSpace:"nowrap"}}>{c}</td>)}</tr>)}</tbody>
+        </table></div>);
+    } else if(l.startsWith("### ")){out.push(<h3 key={i} style={{fontSize:12,color:"#7dd3fc",margin:"8px 0 3px"}}>{l.slice(4)}</h3>);i++;}
+    else if(l.startsWith("## ")){out.push(<h2 key={i} style={{fontSize:13,color:"#93c5fd",margin:"10px 0 4px",textTransform:"uppercase"}}>{l.slice(3)}</h2>);i++;}
+    else if(l.startsWith("# ")){out.push(<h1 key={i} style={{fontSize:15,color:"#f1f5f9",margin:"12px 0 6px",borderBottom:"1px solid #1e293b",paddingBottom:4}}>{l.slice(2)}</h1>);i++;}
+    else if(l.trim()==="---"){out.push(<hr key={i} style={{border:"none",borderTop:"1px solid #1e293b",margin:"10px 0"}}/>);i++;}
+    else if(l.startsWith("- ")||l.startsWith("* ")){
+      const items=[];
+      while(i<lines.length&&(lines[i].startsWith("- ")||lines[i].startsWith("* "))){items.push(<li key={i} style={{fontSize:12,color:"#94a3b8",margin:"2px 0"}}>{lines[i].slice(2)}</li>);i++;}
+      out.push(<ul key={i} style={{paddingLeft:16,margin:"4px 0"}}>{items}</ul>);
+    } else if(l.startsWith("```")){
+      const code=[];i++;
+      while(i<lines.length&&!lines[i].startsWith("```")){code.push(lines[i]);i++;}
+      out.push(<pre key={i} style={{background:"#0f172a",border:"1px solid #1e293b",borderRadius:6,padding:10,margin:"8px 0",overflowX:"auto",fontSize:11,color:"#7dd3fc"}}><code>{code.join("\n")}</code></pre>);i++;
+    } else if(l.trim()){
+      const parts=l.split(/(\*\*[^*]+\*\*)/g).map((p,k)=>p.startsWith("**")&&p.endsWith("**")?<strong key={k} style={{color:"#f1f5f9"}}>{p.slice(2,-2)}</strong>:p);
+      out.push(<p key={i} style={{fontSize:13,margin:"3px 0",lineHeight:1.6}}>{parts}</p>);i++;
+    } else i++;
+  }
+  return React.createElement(React.Fragment,null,...out);
+}
+
+function App() {
+  const [messages,setMessages]=useState([]);
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [tab,setTab]=useState("chat");
+  const [session,setSession]=useState(null);
+  const [sessions,setSessions]=useState([]);
+  const [prs,setPrs]=useState({});
+  const [recentRows,setRecentRows]=useState([]);
+  const [sheetStatus,setSheetStatus]=useState("connecting");
+  const [currentExercise,setCurrentExercise]=useState(null);
+  const [setCounter,setSetCounter]=useState(0);
+  const bottomRef=useRef(null);
+  const inputRef=useRef(null);
+
+  useEffect(()=>{
+    (async()=>{
+      const [prData,recentData,sessionData]=await Promise.all([
+        sheetsGet("get_prs"),sheetsGet("get_recent"),sheetsGet("get_sessions")
+      ]);
+      if(prData?.prs){setPrs(prData.prs);setSheetStatus("ok");}
+      else setSheetStatus("error");
+      if(recentData?.rows)setRecentRows(recentData.rows);
+      if(sessionData?.sessions)setSessions(sessionData.sessions.map(r=>({id:r[0],date:r[1],startTime:r[2],endTime:r[3],duration:r[4]})));
+    })();
+  },[]);
+
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages,loading]);
+
+  const buildContext=useCallback(()=>{
+    const prSummary=Object.entries(prs).map(([ex,v])=>`${ex}: best=${v.weight}lbs x${v.reps}, est1RM=${v.orm}lbs`).join("\n");
+    const recentSummary=recentRows.slice(-50).map(r=>`${r[0]}|${r[2]}|set${r[4]}|${r[5]}lbs x${r[6]}|1RM~${r[10]}`).join("\n");
+    return `\n\n[CURRENT SESSION]: ${session?JSON.stringify(session):"none"}\n\n[PR RECORDS]:\n${prSummary||"none yet"}\n\n[RECENT SETS]:\n${recentSummary||"none yet"}`;
+  },[prs,recentRows,session]);
+
+  const parseSet=text=>{
+    const m=text.match(/set\s*(\d+)\s*:\s*([\d.]+)\s*(?:lbs?|kg)?\s*([\d]+)\s*(?:reps?)?/i);
+    if(!m)return null;
+    return{setNum:parseInt(m[1]),weight:parseFloat(m[2]),reps:parseInt(m[3])};
+  };
+
+  const detectExercise=text=>{
+    if(/set\s*\d/i.test(text))return null;
+    if(/start|end|export|update|analysis/i.test(text))return null;
+    if(text.split(" ").length<=7&&text.length<70)return text.trim();
+    return null;
+  };
+
+  const send=async()=>{
+    if(!input.trim()||loading)return;
+    const userText=input.trim();
+    setInput("");
+    const now=new Date();
+    const timestamp=now.toISOString();
+    let activeSession=session;
+
+    if(/start(ing)?\s+workout/i.test(userText)&&!session){
+      activeSession={id:uid(),date:fmtDate(now),startTime:fmtTime(now),startISO:timestamp,endTime:null,duration:null,sets:0,exercises:[]};
+      setSession(activeSession);
+    }
+
+    const exName=detectExercise(userText);
+    if(exName&&activeSession)setCurrentExercise(exName);
+
+    const setData=parseSet(userText);
+    if(setData&&activeSession&&currentExercise){
+      const orm=epley(setData.weight,setData.reps);
+      sheetsPost({action:"log_set",date:activeSession.date,sessionId:activeSession.id,exercise:currentExercise,type:"—",setNum:setData.setNum,weight:setData.weight,reps:setData.reps,duration:"",distance:"",notes:"",orm,timestamp});
+      setSetCounter(c=>c+1);
+      setPrs(prev=>{
+        const cur=prev[currentExercise];
+        if(!cur||orm>cur.orm)return{...prev,[currentExercise]:{orm,weight:setData.weight,reps:setData.reps}};
+        return prev;
+      });
+      setRecentRows(prev=>[...prev.slice(-149),[activeSession.date,activeSession.id,currentExercise,"—",setData.setNum,setData.weight,setData.reps,"","","",orm,timestamp]]);
+    }
+
+    if(/end\s+workout|end\s+without/i.test(userText)&&activeSession){
+      const endTime=fmtTime(now);
+      const durMin=Math.round((now.getTime()-new Date(activeSession.startISO).getTime())/60000);
+      const ended={...activeSession,endTime,duration:durMin};
+      sheetsPost({action:"log_session",...ended});
+      setSessions(prev=>[...prev,ended]);
+      setSession(null);setCurrentExercise(null);setSetCounter(0);
+    }
+
+    const newMessages=[...messages.slice(-29),{role:"user",content:userText,ts:timestamp}];
+    setMessages(newMessages);
+    setLoading(true);
+
+    try{
+      const context=buildContext();
+      const apiMessages=newMessages.map((m,idx)=>({role:m.role,content:idx===0?m.content+context:m.content}));
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:MODEL,max_tokens:1000,system:SYSTEM_PROMPT,messages:apiMessages})
+      });
+      const data=await res.json();
+      const reply=data.content?.map(b=>b.text||"").join("\n")||"Error.";
+      setMessages(prev=>[...prev,{role:"assistant",content:reply,ts:new Date().toISOString()}]);
+    }catch(err){
+      setMessages(prev=>[...prev,{role:"assistant",content:"Error: "+err.message,ts:new Date().toISOString()}]);
+    }
+    setLoading(false);
+    inputRef.current?.focus();
+  };
+
+  const handleKey=e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}};
+  const quickCmd=cmd=>{setInput(cmd);setTimeout(()=>inputRef.current?.focus(),0);};
+
+  const S={
+    app:{fontFamily:"'SF Mono','Fira Code',monospace",background:"#080b12",color:"#e2e8f0",height:"100dvh",display:"flex",flexDirection:"column",maxWidth:920,margin:"0 auto"},
+    header:{padding:"12px 16px 10px",borderBottom:"1px solid #141e2e",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0},
+    dot:(s)=>({width:7,height:7,borderRadius:"50%",background:s==="ok"?"#4ade80":s==="error"?"#f87171":"#facc15",marginRight:5,display:"inline-block"}),
+    pill:(a)=>({fontSize:10,padding:"3px 10px",borderRadius:999,fontWeight:700,textTransform:"uppercase",background:a?"#052e16":"#0f172a",color:a?"#4ade80":"#475569",border:`1px solid ${a?"#166534":"#1e293b"}`}),
+    tabs:{display:"flex",borderBottom:"1px solid #141e2e",flexShrink:0,padding:"0 16px"},
+    tab:(a)=>({padding:"9px 12px",fontSize:10,fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase",cursor:"pointer",color:a?"#3b82f6":"#334155",background:"none",border:"none",borderBottom:`2px solid ${a?"#3b82f6":"transparent"}`}),
+    chatArea:{flex:1,overflowY:"auto",padding:"14px 16px",display:"flex",flexDirection:"column",gap:12},
+    bubble:(role)=>({padding:"9px 12px",borderRadius:10,fontSize:13,lineHeight:1.6,background:role==="user"?"#0f2441":"#0d1117",border:`1px solid ${role==="user"?"#1d4ed8":"#1e293b"}`,color:role==="user"?"#bfdbfe":"#e2e8f0",maxWidth:"88%"}),
+    avatar:(role)=>({width:24,height:24,borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,flexShrink:0,marginTop:2,background:role==="user"?"linear-gradient(135deg,#2563eb,#7c3aed)":"#0f172a",color:role==="user"?"white":"#475569",border:role==="assistant"?"1px solid #1e293b":"none"}),
+    quickBar:{padding:"8px 16px",display:"flex",flexWrap:"wrap",gap:5,borderTop:"1px solid #0f172a",flexShrink:0},
+    quickBtn:{fontSize:10,padding:"3px 10px",background:"#0d1117",border:"1px solid #1e293b",borderRadius:999,color:"#475569",cursor:"pointer",fontFamily:"inherit"},
+    inputArea:{padding:"10px 16px 14px",borderTop:"1px solid #141e2e",display:"flex",gap:8,flexShrink:0},
+    inputField:{width:"100%",background:"#0d1117",border:"1px solid #1e293b",borderRadius:8,color:"#e2e8f0",fontFamily:"inherit",fontSize:13,padding:"9px 12px",resize:"none",outline:"none",lineHeight:1.4},
+    sendBtn:{background:"linear-gradient(135deg,#2563eb,#7c3aed)",border:"none",borderRadius:8,color:"white",width:38,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",alignSelf:"flex-end",height:38,flexShrink:0},
+    card:{background:"#0d1117",border:"1px solid #1e293b",borderRadius:10,padding:14,marginBottom:10},
+    prCard:{background:"#0d1117",border:"1px solid #1e293b",borderRadius:8,padding:"8px 12px",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"},
+  };
+
+  const dots=[0,0.2,0.4].map((d,i)=><span key={i} style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#3b82f6",margin:"0 2px",animation:`pulse 1.4s ${d}s ease-in-out infinite`}}/>);
+
+  return <div style={S.app}>
+    <div style={S.header}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{width:32,height:32,background:"linear-gradient(135deg,#2563eb,#7c3aed)",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>💪</div>
+        <div>
+          <div style={{fontSize:13,fontWeight:700,letterSpacing:"0.1em",color:"#f1f5f9",textTransform:"uppercase"}}>GymLog AI</div>
+          <div style={{fontSize:10,color:"#475569"}}><span style={S.dot(sheetStatus)}/>{sheetStatus==="ok"?"Sheets connected":sheetStatus==="error"?"Sheets error":"Connecting…"}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        {session&&<span style={{fontSize:10,color:"#64748b"}}>{setCounter} sets</span>}
+        <span style={S.pill(!!session)}>{session?"● Active":"Idle"}</span>
+      </div>
+    </div>
+
+    <div style={S.tabs}>
+      {[["chat","Log"],["history",`History (${sessions.length})`],["prs",`PRs (${Object.keys(prs).length})`]].map(([id,label])=>
+        <button key={id} style={S.tab(tab===id)} onClick={()=>setTab(id)}>{label}</button>
+      )}
+    </div>
+
+    <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+      {tab==="chat"&&<>
+        <div style={S.chatArea}>
+          {messages.length===0&&<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6,color:"#1e293b",textAlign:"center",padding:40}}>
+            <div style={{fontSize:36}}>🏋️</div>
+            <div style={{fontSize:12,fontWeight:700,color:"#334155",textTransform:"uppercase",letterSpacing:"0.05em"}}>Ready to log</div>
+            <div style={{fontSize:11,color:"#1e293b",lineHeight:1.8}}>Say "Starting workout" to begin<br/>Log sets as: Set 1: 135 lbs 10 reps<br/>Say "End workout" for analysis</div>
+          </div>}
+          {messages.map((m,i)=><div key={i} style={{display:"flex",gap:8,flexDirection:m.role==="user"?"row-reverse":"row"}}>
+            <div style={S.avatar(m.role)}>{m.role==="user"?"U":"AI"}</div>
+            <div style={{maxWidth:"88%",display:"flex",flexDirection:"column",alignItems:m.role==="user"?"flex-end":"flex-start"}}>
+              <div style={S.bubble(m.role)}>{m.role==="assistant"?<Md text={m.content}/>:m.content}</div>
+              <div style={{fontSize:10,color:"#334155",marginTop:3}}>{m.ts?new Date(m.ts).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"}):""}</div>
+            </div>
+          </div>)}
+          {loading&&<div style={{display:"flex",gap:8}}>
+            <div style={S.avatar("assistant")}>AI</div>
+            <div style={{...S.bubble("assistant"),padding:"12px 14px"}}>{dots}</div>
+          </div>}
+          <div ref={bottomRef}/>
+        </div>
+        <div style={S.quickBar}>
+          {["Starting workout","End workout","Give analysis","Week update","Export data"].map(c=>
+            <button key={c} style={S.quickBtn} onClick={()=>quickCmd(c)}>{c}</button>
+          )}
+        </div>
+        <div style={S.inputArea}>
+          <textarea ref={inputRef} style={S.inputField} rows={1} placeholder="Name an exercise, log a set, or start your workout…" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={handleKey}/>
+          <button style={{...S.sendBtn,opacity:loading||!input.trim()?0.4:1}} onClick={send} disabled={loading||!input.trim()}>→</button>
+        </div>
+      </>}
+
+      {tab==="history"&&<div style={{flex:1,overflowY:"auto",padding:16}}>
+        {sessions.length===0
+          ?<div style={{textAlign:"center",color:"#334155",padding:"60px 20px",fontSize:12}}>No completed sessions yet.<br/>Say "End workout" to save one.</div>
+          :[...sessions].reverse().map((s,i)=><div key={i} style={S.card}>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9"}}>{s.date}</div>
+                <div style={{fontSize:10,color:"#475569",marginTop:2}}>{s.startTime}{s.endTime?` → ${s.endTime}`:""}</div>
+              </div>
+              {s.duration&&<div style={{fontSize:11,color:"#64748b"}}>{s.duration} min</div>}
+            </div>
+          </div>)
+        }
+      </div>}
+
+      {tab==="prs"&&<div style={{flex:1,overflowY:"auto",padding:16}}>
+        <div style={{fontSize:10,color:"#334155",marginBottom:12,letterSpacing:"0.05em",textTransform:"uppercase"}}>Lifetime Best — Est. 1RM per Exercise</div>
+        {Object.keys(prs).length===0
+          ?<div style={{textAlign:"center",color:"#334155",padding:"60px 20px",fontSize:12}}>No PRs yet. Log some sets!</div>
+          :Object.entries(prs).sort((a,b)=>b[1].orm-a[1].orm).map(([ex,v])=><div key={ex} style={S.prCard}>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:"#e2e8f0"}}>{ex}</div>
+              <div style={{fontSize:10,color:"#475569",marginTop:2}}>{v.weight} lbs × {v.reps} reps</div>
+            </div>
+            <div style={{fontSize:16,fontWeight:700,color:"#3b82f6"}}>~{v.orm} lbs</div>
+          </div>)
+        }
+      </div>}
+    </div>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
