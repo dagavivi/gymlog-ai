@@ -187,7 +187,7 @@ function App() {
     try{
       const context=buildContext();
       const apiMessages=newMessages.map((m,idx)=>({role:m.role,content:idx===0?m.content+context:m.content}));
-      const res=await fetch("https://api.anthropic.com/v1/messages",{
+      const res=await fetch("/api/claude",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({model:MODEL,max_tokens:1000,system:SYSTEM_PROMPT,messages:apiMessages})
