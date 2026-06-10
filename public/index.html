@@ -13,9 +13,10 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #080b12; font-family: 'SF Mono', 'Fira Code', monospace; }
-  ::-webkit-scrollbar { width: 3px; } 
+  ::-webkit-scrollbar { width: 3px; }
   ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 2px; }
   @keyframes pulse { 0%,80%,100%{opacity:.3;transform:scale(.8)} 40%{opacity:1;transform:scale(1)} }
+  @keyframes timerPulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
 </style>
 </head>
 <body>
@@ -25,6 +26,14 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const API = "/api/sheets";
 const MODEL = "claude-haiku-4-5-20251001";
+
+// localStorage keys
+const LS_MESSAGES   = "gymlog_messages";
+const LS_SESSION    = "gymlog_session";
+const LS_EXERCISE   = "gymlog_exercise";
+const LS_SETCOUNTER = "gymlog_setcounter";
+const LS_RECENTROWS = "gymlog_recentrows";
+
 const SYSTEM_PROMPT = `You are an elite personal fitness AI and experienced personal trainer specializing in weight loss and muscle building. Deep knowledge of hypertrophy training, progressive overload, PPL splits (Jeff Nippard style).
 
 RULES:
@@ -51,6 +60,15 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
 const fmtTime = d => d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
 const fmtDate = d => d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
 const epley = (w,r) => r===1?w:Math.round(w*(1+r/30));
+
+function fmtElapsed(ms) {
+  const totalSec = Math.floor(ms/1000);
+  const h = Math.floor(totalSec/3600);
+  const m = Math.floor((totalSec%3600)/60);
+  const s = totalSec%60;
+  if(h>0) return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
 
 async function sheetsGet(action) {
   try { const r = await fetch(`${API}?action=${action}`); return await r.json(); } catch { return null; }
@@ -95,20 +113,45 @@ function Md({text}) {
 }
 
 function App() {
-  const [messages,setMessages]=useState([]);
-  const [input,setInput]=useState("");
-  const [loading,setLoading]=useState(false);
-  const [tab,setTab]=useState("chat");
-  const [session,setSession]=useState(null);
-  const [sessions,setSessions]=useState([]);
-  const [prs,setPrs]=useState({});
-  const [recentRows,setRecentRows]=useState([]);
-  const [sheetStatus,setSheetStatus]=useState("connecting");
-  const [currentExercise,setCurrentExercise]=useState(null);
-  const [setCounter,setSetCounter]=useState(0);
-  const bottomRef=useRef(null);
-  const inputRef=useRef(null);
+  // Restore from localStorage on init
+  const [messages,setMessages]   = useState(()=>{ try{return JSON.parse(localStorage.getItem(LS_MESSAGES))||[];}catch{return[];} });
+  const [session,setSession]     = useState(()=>{ try{return JSON.parse(localStorage.getItem(LS_SESSION))||null;}catch{return null;} });
+  const [currentExercise,setCurrentExercise] = useState(()=>localStorage.getItem(LS_EXERCISE)||null);
+  const [setCounter,setSetCounter] = useState(()=>parseInt(localStorage.getItem(LS_SETCOUNTER)||"0"));
+  const [recentRows,setRecentRows] = useState(()=>{ try{return JSON.parse(localStorage.getItem(LS_RECENTROWS))||[];}catch{return[];} });
 
+  const [input,setInput]         = useState("");
+  const [loading,setLoading]     = useState(false);
+  const [tab,setTab]             = useState("chat");
+  const [sessions,setSessions]   = useState([]);
+  const [prs,setPrs]             = useState({});
+  const [sheetStatus,setSheetStatus] = useState("connecting");
+  const [elapsed,setElapsed]     = useState(0); // ms since session start
+  const bottomRef = useRef(null);
+  const inputRef  = useRef(null);
+  const timerRef  = useRef(null);
+
+  // Persist state to localStorage whenever it changes
+  useEffect(()=>{ localStorage.setItem(LS_MESSAGES, JSON.stringify(messages)); },[messages]);
+  useEffect(()=>{ localStorage.setItem(LS_SESSION,  JSON.stringify(session));  },[session]);
+  useEffect(()=>{ if(currentExercise) localStorage.setItem(LS_EXERCISE, currentExercise); else localStorage.removeItem(LS_EXERCISE); },[currentExercise]);
+  useEffect(()=>{ localStorage.setItem(LS_SETCOUNTER, String(setCounter)); },[setCounter]);
+  useEffect(()=>{ localStorage.setItem(LS_RECENTROWS, JSON.stringify(recentRows)); },[recentRows]);
+
+  // Live timer — uses startISO so it's accurate after reload
+  useEffect(()=>{
+    if(session?.startISO){
+      const tick = ()=>setElapsed(Date.now()-new Date(session.startISO).getTime());
+      tick();
+      timerRef.current = setInterval(tick, 1000);
+    } else {
+      setElapsed(0);
+      clearInterval(timerRef.current);
+    }
+    return ()=>clearInterval(timerRef.current);
+  },[session]);
+
+  // Load Sheets data on mount
   useEffect(()=>{
     (async()=>{
       const [prData,recentData,sessionData]=await Promise.all([
@@ -116,7 +159,7 @@ function App() {
       ]);
       if(prData?.prs){setPrs(prData.prs);setSheetStatus("ok");}
       else setSheetStatus("error");
-      if(recentData?.rows)setRecentRows(recentData.rows);
+      if(recentData?.rows) setRecentRows(prev=> prev.length>0 ? prev : recentData.rows);
       if(sessionData?.sessions)setSessions(sessionData.sessions.map(r=>({id:r[0],date:r[1],startTime:r[2],endTime:r[3],duration:r[4]})));
     })();
   },[]);
@@ -126,8 +169,8 @@ function App() {
   const buildContext=useCallback(()=>{
     const prSummary=Object.entries(prs).map(([ex,v])=>`${ex}: best=${v.weight}lbs x${v.reps}, est1RM=${v.orm}lbs`).join("\n");
     const recentSummary=recentRows.slice(-50).map(r=>`${r[0]}|${r[2]}|set${r[4]}|${r[5]}lbs x${r[6]}|1RM~${r[10]}`).join("\n");
-    return `\n\n[CURRENT SESSION]: ${session?JSON.stringify(session):"none"}\n\n[PR RECORDS]:\n${prSummary||"none yet"}\n\n[RECENT SETS]:\n${recentSummary||"none yet"}`;
-  },[prs,recentRows,session]);
+    return `\n\n[CURRENT SESSION]: ${session?JSON.stringify(session):"none"}\n[CURRENT EXERCISE]: ${currentExercise||"none"}\n[SET COUNT]: ${setCounter}\n\n[PR RECORDS]:\n${prSummary||"none yet"}\n\n[RECENT SETS]:\n${recentSummary||"none yet"}`;
+  },[prs,recentRows,session,currentExercise,setCounter]);
 
   const parseSet=text=>{
     const m=text.match(/set\s*(\d+)\s*:\s*([\d.]+)\s*(?:lbs?|kg)?\s*([\d]+)\s*(?:reps?)?/i);
@@ -178,6 +221,9 @@ function App() {
       sheetsPost({action:"log_session",...ended});
       setSessions(prev=>[...prev,ended]);
       setSession(null);setCurrentExercise(null);setSetCounter(0);
+      localStorage.removeItem(LS_SESSION);
+      localStorage.removeItem(LS_EXERCISE);
+      localStorage.removeItem(LS_SETCOUNTER);
     }
 
     const newMessages=[...messages.slice(-29),{role:"user",content:userText,ts:timestamp}];
@@ -226,6 +272,21 @@ function App() {
 
   const dots=[0,0.2,0.4].map((d,i)=><span key={i} style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#3b82f6",margin:"0 2px",animation:`pulse 1.4s ${d}s ease-in-out infinite`}}/>);
 
+  // Timer banner shown when session is active
+  const timerBanner = session && (
+    <div style={{background:"#0a1628",borderBottom:"1px solid #1e3a5f",padding:"6px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{width:7,height:7,borderRadius:"50%",background:"#4ade80",display:"inline-block",animation:"timerPulse 2s ease-in-out infinite"}}/>
+        <span style={{fontSize:10,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.08em"}}>Workout in progress</span>
+        {currentExercise&&<span style={{fontSize:10,color:"#475569"}}>· {currentExercise}</span>}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <span style={{fontSize:10,color:"#64748b"}}>{setCounter} sets</span>
+        <span style={{fontSize:14,fontWeight:700,color:"#4ade80",fontVariantNumeric:"tabular-nums",letterSpacing:"0.05em"}}>{fmtElapsed(elapsed)}</span>
+      </div>
+    </div>
+  );
+
   return <div style={S.app}>
     <div style={S.header}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -235,11 +296,10 @@ function App() {
           <div style={{fontSize:10,color:"#475569"}}><span style={S.dot(sheetStatus)}/>{sheetStatus==="ok"?"Sheets connected":sheetStatus==="error"?"Sheets error":"Connecting…"}</div>
         </div>
       </div>
-      <div style={{display:"flex",gap:8,alignItems:"center"}}>
-        {session&&<span style={{fontSize:10,color:"#64748b"}}>{setCounter} sets</span>}
-        <span style={S.pill(!!session)}>{session?"● Active":"Idle"}</span>
-      </div>
+      <span style={S.pill(!!session)}>{session?"● Active":"Idle"}</span>
     </div>
+
+    {timerBanner}
 
     <div style={S.tabs}>
       {[["chat","Log"],["history",`History (${sessions.length})`],["prs",`PRs (${Object.keys(prs).length})`]].map(([id,label])=>
